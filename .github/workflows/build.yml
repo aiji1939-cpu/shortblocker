@@ -129,8 +129,7 @@ jobs:
               android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
               android:canRetrieveWindowContent="true"
               android:description="@string/service_description"
-              android:notificationTimeout="150"
-              android:packageNames="com.instagram.android,com.google.android.youtube" />
+              android:notificationTimeout="150" />
           EOF_FILE
           mkdir -p app/src/main/res/values
           cat > app/src/main/res/values/strings.xml <<'EOF_FILE'
@@ -145,34 +144,93 @@ jobs:
           package com.example.shortsblocker
 
           import android.accessibilityservice.AccessibilityService
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.Rect
+          import android.view.Gravity
+          import android.view.View
+          import android.view.WindowManager
           import android.view.accessibility.AccessibilityEvent
           import android.view.accessibility.AccessibilityNodeInfo
+          import android.widget.FrameLayout
+          import android.widget.TextView
           import android.widget.Toast
+          import java.util.Calendar
 
           class BlockerService : AccessibilityService() {
 
               private var lastBlockAt = 0L
+              private lateinit var wm: WindowManager
+              private val feedOverlay = Overlay("Feed hidden")
+              private val tabOverlay = Overlay(null)
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+              }
 
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-                  val pkg = event?.packageName?.toString() ?: return
+                  val ev = event ?: return
+                  val pkg = ev.packageName?.toString() ?: return
+                  if (pkg == packageName) return
+
+                  // Events from other apps: just make sure our overlays go away
+                  // when Instagram is no longer the app on screen.
+                  if (pkg != INSTAGRAM && pkg != YOUTUBE) {
+                      if (ev.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                          val active = rootInActiveWindow?.packageName?.toString()
+                          if (active != INSTAGRAM) hideOverlays()
+                      }
+                      return
+                  }
+
                   val prefs = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
 
-                  val enabled = when (pkg) {
-                      INSTAGRAM -> prefs.getBoolean(MainActivity.KEY_REELS, true)
-                      YOUTUBE -> prefs.getBoolean(MainActivity.KEY_SHORTS, true)
-                      else -> false
+                  if (!isBlockingTime(prefs)) {
+                      hideOverlays()
+                      return
                   }
-                  if (!enabled) return
 
                   val root = rootInActiveWindow ?: return
-                  val onShorts = try {
-                      if (pkg == INSTAGRAM) isReelsScreen(root) else isShortsScreen(root)
-                  } finally {
-                      root.recycle()
-                  }
+                  if (root.packageName?.toString() != pkg) return
 
+                  if (pkg == INSTAGRAM) {
+                      if (prefs.getBoolean(MainActivity.KEY_REELS, true) && isReelsScreen(root)) {
+                          hideOverlays()
+                          blockNow()
+                          return
+                      }
+                      updateOverlays(root, prefs)
+                  } else {
+                      hideOverlays()
+                      if (prefs.getBoolean(MainActivity.KEY_SHORTS, true) && isShortsScreen(root)) {
+                          blockNow()
+                      }
+                  }
+              }
+
+              // ---- Block hours ----------------------------------------------------
+
+              private fun isBlockingTime(prefs: SharedPreferences): Boolean {
+                  if (!prefs.getBoolean(MainActivity.KEY_USE_HOURS, false)) return true
+                  val start = prefs.getInt(MainActivity.KEY_START, 9 * 60)
+                  val end = prefs.getInt(MainActivity.KEY_END, 18 * 60)
+                  val c = Calendar.getInstance()
+                  val now = c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE)
+                  return when {
+                      start == end -> true
+                      start < end -> now in start until end
+                      else -> now >= start || now < end // window crosses midnight
+                  }
+              }
+
+              // ---- Blocking Reels / Shorts screens ----------------------------------
+
+              private fun blockNow() {
                   val now = System.currentTimeMillis()
-                  if (onShorts && now - lastBlockAt > COOLDOWN_MS) {
+                  if (now - lastBlockAt > COOLDOWN_MS) {
                       lastBlockAt = now
                       performGlobalAction(GLOBAL_ACTION_BACK)
                       Toast.makeText(this, "Blocked", Toast.LENGTH_SHORT).show()
@@ -180,7 +238,6 @@ jobs:
               }
 
               // View ids come from the apps' own layouts and can change with app updates.
-              // If blocking stops working after an update, adjust these lists.
               private fun isReelsScreen(root: AccessibilityNodeInfo): Boolean =
                   hasAnyId(
                       root,
@@ -204,15 +261,143 @@ jobs:
               private fun hasAnyId(root: AccessibilityNodeInfo, ids: List<String>): Boolean {
                   for (id in ids) {
                       val nodes = root.findAccessibilityNodeInfosByViewId(id)
-                      if (!nodes.isNullOrEmpty()) {
-                          nodes.forEach { it.recycle() }
-                          return true
-                      }
+                      if (!nodes.isNullOrEmpty()) return true
                   }
                   return false
               }
 
-              override fun onInterrupt() {}
+              // ---- Instagram home feed blackout + hidden Reels tab -------------------
+
+              private fun updateOverlays(root: AccessibilityNodeInfo, prefs: SharedPreferences) {
+                  val screenW = resources.displayMetrics.widthPixels
+                  val screenH = resources.displayMetrics.heightPixels
+                  val r = Rect()
+
+                  // Home feed: cover the area under the stories row, down to the tab bar.
+                  val home = findTab(root, "com.instagram.android:id/feed_tab", "Home")
+                  val onHome = home != null && (home.isSelected || home.isChecked)
+                  if (prefs.getBoolean(MainActivity.KEY_FEED, true) && home != null && onHome) {
+                      home.getBoundsInScreen(r)
+                      val bottom = r.top
+                      val topPct = prefs.getInt(MainActivity.KEY_TOP_PCT, 24)
+                      val top = screenH * topPct / 100
+                      if (bottom > top) {
+                          feedOverlay.show(Rect(0, top, screenW, bottom))
+                      } else {
+                          feedOverlay.hide()
+                      }
+                  } else {
+                      feedOverlay.hide()
+                  }
+
+                  // Reels tab: cover it so it can't be tapped.
+                  if (prefs.getBoolean(MainActivity.KEY_REELS_TAB, true)) {
+                      val reelsTab = findTab(root, "com.instagram.android:id/clips_tab", "Reels")
+                      if (reelsTab != null) {
+                          reelsTab.getBoundsInScreen(r)
+                          if (r.width() > 0 && r.height() > 0) {
+                              tabOverlay.show(Rect(r))
+                          } else {
+                              tabOverlay.hide()
+                          }
+                      } else {
+                          tabOverlay.hide()
+                      }
+                  } else {
+                      tabOverlay.hide()
+                  }
+              }
+
+              private fun findTab(root: AccessibilityNodeInfo, id: String, desc: String): AccessibilityNodeInfo? {
+                  root.findAccessibilityNodeInfosByViewId(id)
+                      ?.firstOrNull { it.isVisibleToUser }
+                      ?.let { return it }
+
+                  // Fallback: look for the tab by its content description, in the bottom part of the screen.
+                  val minTop = resources.displayMetrics.heightPixels * 0.8f
+                  val r = Rect()
+                  return root.findAccessibilityNodeInfosByText(desc)?.firstOrNull {
+                      it.isVisibleToUser &&
+                          (it.contentDescription?.toString()?.startsWith(desc, true) == true) &&
+                          run {
+                              it.getBoundsInScreen(r)
+                              r.top >= minTop
+                          }
+                  }
+              }
+
+              private fun hideOverlays() {
+                  feedOverlay.hide()
+                  tabOverlay.hide()
+              }
+
+              private inner class Overlay(private val label: String?) {
+                  private var view: View? = null
+                  private var rect = Rect()
+
+                  fun show(r: Rect) {
+                      try {
+                          val lp = WindowManager.LayoutParams(
+                              r.width(),
+                              r.height(),
+                              WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                              WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                                  WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                                  WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                              PixelFormat.OPAQUE
+                          ).apply {
+                              gravity = Gravity.TOP or Gravity.START
+                              x = r.left
+                              y = r.top
+                          }
+                          val v = view
+                          if (v == null) {
+                              val frame = FrameLayout(this@BlockerService)
+                              frame.setBackgroundColor(Color.BLACK)
+                              if (label != null) {
+                                  val tv = TextView(this@BlockerService)
+                                  tv.text = label
+                                  tv.setTextColor(Color.DKGRAY)
+                                  tv.textSize = 16f
+                                  tv.gravity = Gravity.CENTER
+                                  frame.addView(
+                                      tv,
+                                      FrameLayout.LayoutParams(
+                                          FrameLayout.LayoutParams.MATCH_PARENT,
+                                          FrameLayout.LayoutParams.MATCH_PARENT
+                                      )
+                                  )
+                              }
+                              wm.addView(frame, lp)
+                              view = frame
+                          } else if (r != rect) {
+                              wm.updateViewLayout(v, lp)
+                          }
+                          rect = Rect(r)
+                      } catch (e: Exception) {
+                          view = null
+                      }
+                  }
+
+                  fun hide() {
+                      val v = view ?: return
+                      try {
+                          wm.removeView(v)
+                      } catch (e: Exception) {
+                          // already gone
+                      }
+                      view = null
+                  }
+              }
+
+              override fun onInterrupt() {
+                  hideOverlays()
+              }
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  hideOverlays()
+                  return super.onUnbind(intent)
+              }
 
               companion object {
                   private const val INSTAGRAM = "com.instagram.android"
@@ -226,85 +411,65 @@ jobs:
           package com.example.shortsblocker
 
           import android.app.Activity
+          import android.app.TimePickerDialog
           import android.content.Intent
+          import android.content.SharedPreferences
           import android.graphics.Typeface
           import android.os.Bundle
           import android.provider.Settings
-          import android.view.Gravity
           import android.view.ViewGroup
           import android.widget.Button
           import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.SeekBar
           import android.widget.Switch
           import android.widget.TextView
 
           class MainActivity : Activity() {
 
+              private lateinit var prefs: SharedPreferences
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+                  prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
                   val pad = (20 * resources.displayMetrics.density).toInt()
 
                   val layout = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      setPadding(pad, pad * 2, pad, pad)
+                      setPadding(pad, pad * 2, pad, pad * 2)
+                  }
+                  val scroll = ScrollView(this).apply {
                       layoutParams = ViewGroup.LayoutParams(
                           ViewGroup.LayoutParams.MATCH_PARENT,
                           ViewGroup.LayoutParams.MATCH_PARENT
                       )
+                      addView(layout)
                   }
 
-                  layout.addView(TextView(this).apply {
-                      text = "Shorts Blocker"
-                      textSize = 28f
-                      typeface = Typeface.DEFAULT_BOLD
-                  })
-                  layout.addView(TextView(this).apply {
-                      text = "1. Tap the button below.\n2. Open Installed apps / Downloaded apps.\n3. Turn on Shorts Blocker."
-                      textSize = 16f
-                      setPadding(0, pad / 2, 0, pad)
-                  })
-                  layout.addView(Button(this).apply {
-                      text = "Open Accessibility Settings"
-                      setOnClickListener {
-                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                      }
-                  })
+                  fun heading(text: String) {
+                      layout.addView(TextView(this).apply {
+                          this.text = text
+                          textSize = 20f
+                          typeface = Typeface.DEFAULT_BOLD
+                          setPadding(0, pad, 0, pad / 4)
+                      })
+                  }
 
-                  fun toggle(label: String, key: String) {
+                  fun toggle(label: String, key: String, default: Boolean) {
                       layout.addView(Switch(this).apply {
                           text = label
-                          textSize = 18f
-                          isChecked = prefs.getBoolean(key, true)
-                          gravity = Gravity.CENTER_VERTICAL
-                          setPadding(0, pad, 0, 0)
+                          textSize = 17f
+                          isChecked = prefs.getBoolean(key, default)
+                          setPadding(0, pad / 2, 0, pad / 2)
                           setOnCheckedChangeListener { _, checked ->
                               prefs.edit().putBoolean(key, checked).apply()
                           }
                       })
                   }
-                  toggle("Block Instagram Reels", KEY_REELS)
-                  toggle("Block YouTube Shorts", KEY_SHORTS)
 
-                  setContentView(layout)
-              }
-
-              companion object {
-                  const val PREFS = "blocker_prefs"
-                  const val KEY_REELS = "block_reels"
-                  const val KEY_SHORTS = "block_shorts"
-              }
-          }
-          EOF_FILE
-
-      - name: Build debug APK
-        run: gradle assembleDebug --no-daemon
-
-      - name: Publish APK to Releases
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete latest -y --cleanup-tag --repo ${{ github.repository }} || true
-          gh release create latest app/build/outputs/apk/debug/app-debug.apk \
-            --repo ${{ github.repository }} --target ${{ github.sha }} \
-            --title "Shorts Blocker (latest)" \
-            --notes "Download app-debug.apk and install it."
+                  fun timeButton(prefix: String, key: String, default: Int) {
+                      val b = Button(this)
+                      fun refresh() {
+                          b.text = prefix + ": " + format12(prefs.getInt(key, default))
+                      }
+    
