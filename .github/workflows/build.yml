@@ -1,0 +1,312 @@
+name: Build Shorts Blocker APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Create project files
+        run: |
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ShortsBlocker"
+          include(":app")
+          EOF_FILE
+          cat > build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF_FILE
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.shortsblocker"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.shortsblocker"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <application
+                  android:allowBackup="false"
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".BlockerService"
+                      android:exported="false"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/accessibility_service_config.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+              android:canRetrieveWindowContent="true"
+              android:description="@string/service_description"
+              android:notificationTimeout="150"
+              android:packageNames="com.instagram.android,com.google.android.youtube" />
+          EOF_FILE
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/strings.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Shorts Blocker</string>
+              <string name="service_description">Detects Instagram Reels and YouTube Shorts screens and closes them. It only looks at screen structure on those two apps and never reads or stores your content.</string>
+          </resources>
+          EOF_FILE
+          mkdir -p app/src/main/java/com/example/shortsblocker
+          cat > app/src/main/java/com/example/shortsblocker/BlockerService.kt <<'EOF_FILE'
+          package com.example.shortsblocker
+
+          import android.accessibilityservice.AccessibilityService
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+          import android.widget.Toast
+
+          class BlockerService : AccessibilityService() {
+
+              private var lastBlockAt = 0L
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                  val pkg = event?.packageName?.toString() ?: return
+                  val prefs = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
+
+                  val enabled = when (pkg) {
+                      INSTAGRAM -> prefs.getBoolean(MainActivity.KEY_REELS, true)
+                      YOUTUBE -> prefs.getBoolean(MainActivity.KEY_SHORTS, true)
+                      else -> false
+                  }
+                  if (!enabled) return
+
+                  val root = rootInActiveWindow ?: return
+                  val onShorts = try {
+                      if (pkg == INSTAGRAM) isReelsScreen(root) else isShortsScreen(root)
+                  } finally {
+                      root.recycle()
+                  }
+
+                  val now = System.currentTimeMillis()
+                  if (onShorts && now - lastBlockAt > COOLDOWN_MS) {
+                      lastBlockAt = now
+                      performGlobalAction(GLOBAL_ACTION_BACK)
+                      Toast.makeText(this, "Blocked", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              // View ids come from the apps' own layouts and can change with app updates.
+              // If blocking stops working after an update, adjust these lists.
+              private fun isReelsScreen(root: AccessibilityNodeInfo): Boolean =
+                  hasAnyId(
+                      root,
+                      listOf(
+                          "com.instagram.android:id/clips_viewer_view_pager",
+                          "com.instagram.android:id/clips_viewer_container",
+                          "com.instagram.android:id/clips_viewer_fragment_container"
+                      )
+                  )
+
+              private fun isShortsScreen(root: AccessibilityNodeInfo): Boolean =
+                  hasAnyId(
+                      root,
+                      listOf(
+                          "com.google.android.youtube:id/reel_player_page_container",
+                          "com.google.android.youtube:id/reel_recycler",
+                          "com.google.android.youtube:id/shorts_container"
+                      )
+                  )
+
+              private fun hasAnyId(root: AccessibilityNodeInfo, ids: List<String>): Boolean {
+                  for (id in ids) {
+                      val nodes = root.findAccessibilityNodeInfosByViewId(id)
+                      if (!nodes.isNullOrEmpty()) {
+                          nodes.forEach { it.recycle() }
+                          return true
+                      }
+                  }
+                  return false
+              }
+
+              override fun onInterrupt() {}
+
+              companion object {
+                  private const val INSTAGRAM = "com.instagram.android"
+                  private const val YOUTUBE = "com.google.android.youtube"
+                  private const val COOLDOWN_MS = 800L
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java/com/example/shortsblocker
+          cat > app/src/main/java/com/example/shortsblocker/MainActivity.kt <<'EOF_FILE'
+          package com.example.shortsblocker
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.Typeface
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.Switch
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+                  val pad = (20 * resources.displayMetrics.density).toInt()
+
+                  val layout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(pad, pad * 2, pad, pad)
+                      layoutParams = ViewGroup.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.MATCH_PARENT
+                      )
+                  }
+
+                  layout.addView(TextView(this).apply {
+                      text = "Shorts Blocker"
+                      textSize = 28f
+                      typeface = Typeface.DEFAULT_BOLD
+                  })
+                  layout.addView(TextView(this).apply {
+                      text = "1. Tap the button below.\n2. Open Installed apps / Downloaded apps.\n3. Turn on Shorts Blocker."
+                      textSize = 16f
+                      setPadding(0, pad / 2, 0, pad)
+                  })
+                  layout.addView(Button(this).apply {
+                      text = "Open Accessibility Settings"
+                      setOnClickListener {
+                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                      }
+                  })
+
+                  fun toggle(label: String, key: String) {
+                      layout.addView(Switch(this).apply {
+                          text = label
+                          textSize = 18f
+                          isChecked = prefs.getBoolean(key, true)
+                          gravity = Gravity.CENTER_VERTICAL
+                          setPadding(0, pad, 0, 0)
+                          setOnCheckedChangeListener { _, checked ->
+                              prefs.edit().putBoolean(key, checked).apply()
+                          }
+                      })
+                  }
+                  toggle("Block Instagram Reels", KEY_REELS)
+                  toggle("Block YouTube Shorts", KEY_SHORTS)
+
+                  setContentView(layout)
+              }
+
+              companion object {
+                  const val PREFS = "blocker_prefs"
+                  const val KEY_REELS = "block_reels"
+                  const val KEY_SHORTS = "block_shorts"
+              }
+          }
+          EOF_FILE
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Publish APK to Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest -y --cleanup-tag --repo ${{ github.repository }} || true
+          gh release create latest app/build/outputs/apk/debug/app-debug.apk \
+            --repo ${{ github.repository }} --target ${{ github.sha }} \
+            --title "Shorts Blocker (latest)" \
+            --notes "Download app-debug.apk and install it."
