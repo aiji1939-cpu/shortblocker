@@ -140,8 +140,8 @@ jobs:
               <string name="service_description">Detects Instagram Reels and YouTube Shorts screens and closes them. It only looks at screen structure on those two apps and never reads or stores your content.</string>
           </resources>
           EOF_FILE
-          mkdir -p app/src/main/java/com/example/shortsblocker
-          cat > app/src/main/java/com/example/shortsblocker/BlockerService.kt <<'EOF_FILE'
+                     mkdir -p app/src/main/java/com/example/shortsblocker
+            cat > app/src/main/java/com/example/shortsblocker/BlockerService.kt <<'EOF_FILE'
           package com.example.shortsblocker
 
           import android.accessibilityservice.AccessibilityService
@@ -592,102 +592,4 @@ jobs:
                       }
                   })
                   layout.addView(TextView(this).apply {
-                      text = "If the service keeps switching itself off: open App battery usage here and choose Unrestricted."
-                      textSize = 13f
-                  })
-
-                  heading("What to block")
-                  toggle("Block Instagram Reels", KEY_REELS, true)
-                  toggle("Block YouTube Shorts", KEY_SHORTS, true)
-                  toggle("Black out Instagram home feed", KEY_FEED, true)
-                  toggle("Hide Instagram Reels tab", KEY_REELS_TAB, true)
-
-                  val pctLabel = TextView(this).apply { textSize = 15f }
-                  fun refreshPct(p: Int) {
-                      pctLabel.text = "Feed blackout starts $p% from the top of the screen"
-                  }
-                  layout.addView(pctLabel)
-                  layout.addView(SeekBar(this).apply {
-                      max = 40
-                      progress = prefs.getInt(KEY_TOP_PCT, 24) - 10
-                      refreshPct(progress + 10)
-                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                          override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
-                              refreshPct(value + 10)
-                              prefs.edit().putInt(KEY_TOP_PCT, value + 10).apply()
-                          }
-
-                          override fun onStartTrackingTouch(sb: SeekBar?) {}
-                          override fun onStopTrackingTouch(sb: SeekBar?) {}
-                      })
-                  })
-                  layout.addView(TextView(this).apply {
-                      text = "Move this until the stories row stays visible and the feed below it is black."
-                      textSize = 13f
-                  })
-
-                  heading("Block hours")
-                  toggle("Only block during these hours", KEY_USE_HOURS, false)
-                  timeButton("Start", KEY_START, 9 * 60)
-                  timeButton("End", KEY_END, 18 * 60)
-                  layout.addView(TextView(this).apply {
-                      text = "Outside these hours everything works normally. If the switch above is off, blocking is always on."
-                      textSize = 13f
-                  })
-
-                  setContentView(scroll)
-              }
-
-              override fun onResume() {
-                  super.onResume()
-                  refreshStatus()
-              }
-
-              private fun refreshStatus() {
-                  val enabled = Settings.Secure.getString(
-                      contentResolver,
-                      Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-                  ) ?: ""
-                  if (enabled.contains(packageName + "/")) {
-                      statusView.text = "Service is ON"
-                      statusView.setTextColor(Color.rgb(0, 130, 60))
-                  } else {
-                      statusView.text = "Service is OFF - turn it on in Accessibility settings"
-                      statusView.setTextColor(Color.rgb(190, 30, 30))
-                  }
-              }
-
-              private fun format12(minutes: Int): String {
-                  val h = minutes / 60
-                  val m = minutes % 60
-                  val h12 = if (h % 12 == 0) 12 else h % 12
-                  val suffix = if (h < 12) "AM" else "PM"
-                  return String.format("%d:%02d %s", h12, m, suffix)
-              }
-
-              companion object {
-                  const val PREFS = "blocker_prefs"
-                  const val KEY_REELS = "block_reels"
-                  const val KEY_SHORTS = "block_shorts"
-                  const val KEY_FEED = "block_feed"
-                  const val KEY_REELS_TAB = "hide_reels_tab"
-                  const val KEY_TOP_PCT = "feed_top_pct"
-                  const val KEY_USE_HOURS = "use_hours"
-                  const val KEY_START = "start_min"
-                  const val KEY_END = "end_min"
-              }
-          }
-          EOF_FILE
-
-      - name: Build debug APK
-        run: gradle assembleDebug --no-daemon
-
-      - name: Publish APK to Releases
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete latest -y --cleanup-tag --repo ${{ github.repository }} || true
-          gh release create latest app/build/outputs/apk/debug/app-debug.apk \
-            --repo ${{ github.repository }} --target ${{ github.sha }} \
-            --title "Shorts Blocker (latest)" \
-            --notes "Download app-debug.apk and install it."
+                      text = "If the service keeps switching itself off: open App battery usage here and c
